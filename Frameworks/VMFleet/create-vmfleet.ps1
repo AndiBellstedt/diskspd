@@ -33,16 +33,15 @@ param(
     [string]$Admin = 'administrator',
     [string]$ConnectPass = $(throw 'need password for loopback host connection'),
     [string]$ConnectUser = $(throw 'need username for loopback host connection'),
-    [validateset('CreateVMSwitch','CopyVHD','CreateVM','CreateVMGroup','AssertComplete')][string]$StopAfter,
-    [validateset('Force','Auto','None')][string]$Specialize = 'Auto',
+    [validateset('CreateVMSwitch', 'CopyVHD', 'CreateVM', 'CreateVMGroup', 'AssertComplete')][string]$StopAfter,
+    [validateset('Force', 'Auto', 'None')][string]$Specialize = 'Auto',
     [switch]$FixedVHD = $true,
     [string[]]$Nodes = @()
-    )
+)
 
-function Stop-After($step)
-{
+function Stop-After($step) {
     if ($stopafter -eq $step) {
-        write-host -ForegroundColor Green Stop after $step
+        Write-Host -ForegroundColor Green Stop after $step
         return $true
     }
     return $false
@@ -55,7 +54,7 @@ if (!(test-path -path $BaseVHD)) {
     throw "Base VHD $BaseVHD not found"
 }
 
-if (Get-ClusterNode |? State -ne Up) {
+if (Get-ClusterNode | Where-Object State -ne Up) {
     throw "not all cluster nodes are up; please address before creating vmfleet"
 }
 
@@ -66,35 +65,32 @@ if ($nodes.count -eq 0) {
 
 # convert to fixed vhd(x) if needed
 if ((get-vhd $basevhd).VhdType -ne 'Fixed' -and $fixedvhd) {
-                                    
     # push dynamic vhd to tmppath and place converted at original
     # note that converting a dynamic will leave a sparse hole on refs
     # this is OK, since the copy will not copy the hole
-    $f = gi $basevhd
+    $f = Get-Item $basevhd
     $tmpname = "tmp-$($f.Name)"
     $tmppath = join-path $f.DirectoryName $tmpname
-    del -Force $tmppath -ErrorAction SilentlyContinue
-    ren $f.FullName $tmpname
+    Remove-Item -Force $tmppath -ErrorAction SilentlyContinue
+    Rename-Item $f.FullName $tmpname
 
-    write-host -ForegroundColor Yellow "convert $($f.FullName) to fixed via $tmppath"
+    Write-Host -ForegroundColor Yellow "convert $($f.FullName) to fixed via $tmppath"
     convert-vhd -Path $tmppath -DestinationPath $f.FullName -VHDType Fixed
     if (-not $?) {
-        ren $tmppath $f.Name
+        Rename-Item $tmppath $f.Name
         throw "ERROR: could not convert $($f.fullname) to fixed vhdx"
     }
-    
-    del $tmppath
+
+    Remove-Item $tmppath
 }
 
 # Create the fleet vmswitches with a fixed IP at the base of the APIPA range
-icm $nodes {
-
+Invoke-Command $nodes {
     if (-not (Get-VMSwitch -Name Internal -ErrorAction SilentlyContinue)) {
-    
         New-VMSwitch -name Internal -SwitchType Internal
-        Get-NetAdapter |? DriverDescription -eq 'Hyper-V Virtual Ethernet Adapter' |? Name -eq 'vEthernet (Internal)' | New-NetIPAddress -PrefixLength 16 -IPAddress '169.254.1.1'
+        Get-NetAdapter | Where-Object DriverDescription -eq 'Hyper-V Virtual Ethernet Adapter' | Where-Object Name -eq 'vEthernet (Internal)' | New-NetIPAddress -PrefixLength 16 -IPAddress '169.254.1.1'
     }
-} | ft -AutoSize
+} | Format-Table -AutoSize
 
 #### STOPAFTER
 if (Stop-After "CreateVMSwitch") {
@@ -104,17 +100,16 @@ if (Stop-After "CreateVMSwitch") {
 # create $vms vms per each csv named as <nodename><group prefix>
 # vm name is vm-<group prefix><$group>-<hostname>-<number>
 
-icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
-
-    param( [string]$stopafter,
-           $fn )
+Invoke-Command $nodes -ArgumentList $stopafter, (Get-Command Stop-After) {
+    param(
+        [string]$stopafter,
+        $fn
+    )
 
     set-item -Path function:\$($fn.name) -Value $fn.definition
     # workaround evaluation bug and make $stopafter evaluate in the session
     $null = $stopafter
-
-    function apply-specialization( $path )
-    {
+    function apply-specialization( $path ) {
         # all steps here can fail immediately without cleanup
 
         # error accumulator
@@ -122,7 +117,7 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
 
         # create run directory
 
-        del -Recurse -Force z:\run -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force z:\run -ErrorAction SilentlyContinue
         mkdir z:\run
         $ok = $ok -band $?
         if (-not $ok) {
@@ -152,22 +147,22 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
 
         # scripts
 
-        copy -Force C:\ClusterStorage\collect\control\master.ps1 z:\run\master.ps1
+        Copy-Item -Force C:\ClusterStorage\collect\control\master.ps1 z:\run\master.ps1
         $ok = $ok -band $?
         if (-not $ok) {
             Write-Error "failed injection of specd master.ps1 for $vhdpath"
             return $ok
         }
 
-        del -Force z:\users\administrator\launch.ps1 -ErrorAction SilentlyContinue
-        gc C:\ClusterStorage\collect\control\launch-template.ps1 |% { $_ -replace '__CONNECTUSER__',$using:connectuser -replace '__CONNECTPASS__',$using:connectpass } > z:\users\administrator\launch.ps1
+        Remove-Item -Force z:\users\administrator\launch.ps1 -ErrorAction SilentlyContinue
+        Get-Content C:\ClusterStorage\collect\control\launch-template.ps1 | ForEach-Object { $_ -replace '__CONNECTUSER__', $using:connectuser -replace '__CONNECTPASS__', $using:connectpass } > z:\users\administrator\launch.ps1
         $ok = $ok -band $?
         if (-not $ok) {
             Write-Error "failed injection of launch.ps1 for $vhdpath"
             return $err
         }
 
-        echo $vmspec > z:\vmspec.txt
+        Write-Output $vmspec > z:\vmspec.txt
         $ok = $ok -band $?
         if (-not $ok) {
             Write-Error "failed injection of vmspec for $vhdpath"
@@ -175,8 +170,8 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
         }
 
         # load files
-        $f = 'z:\run\testfile1.dat'
-        if (-not (gi $f -ErrorAction SilentlyContinue)) {
+        $f = 'testfile1.dat'
+        if (-not (Get-Item $f -ErrorAction SilentlyContinue)) {
             fsutil file createnew $f (10GB)
             $ok = $ok -band $?
             fsutil file setvaliddata $f (10GB)
@@ -190,10 +185,9 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
         return $ok
     }
 
-    function specialize-vhd( $vhdpath )
-    {
-        $vhd = (gi $vhdpath)
-        $vmspec = $vhd.Directory.Name,$vhd.BaseName -join '+'
+    function specialize-vhd( $vhdpath ) {
+        $vhd = (Get-Item $vhdpath)
+        $vmspec = $vhd.Directory.Name, $vhd.BaseName -join '+'
 
         # mount vhd and its largest partition
         $o = Mount-VHD $vhd -NoDriveLetter -Passthru
@@ -201,7 +195,7 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
             Write-Error "failed mount for $vhdpath"
             return $false
         }
-        $p = Get-Disk -number $o.DiskNumber | Get-Partition | sort -Property size -Descending | select -first 1
+        $p = Get-Disk -number $o.DiskNumber | Get-Partition | Sort-Object -Property size -Descending | Select-Object -first 1
         $p | Add-PartitionAccessPath -AccessPath Z:
 
         $ok = apply-specialization Z:
@@ -218,17 +212,16 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
     # don't rely on the csv name to contain this data
 
     $vh = @{}
-    Get-Volume |? FileSystem -eq CSVFS |% { $vh[$_.Path] = $_ }
+    Get-Volume | Where-Object FileSystem -eq CSVFS | ForEach-Object { $vh[$_.Path] = $_ }
 
-    $csvs |% {
-        $v = $vh[$_.SharedVolumeInfo.Partition.Name] 
+    $csvs | ForEach-Object {
+        $v = $vh[$_.SharedVolumeInfo.Partition.Name]
         if ($v -ne $null) {
             $_ | Add-Member -NotePropertyName VDName -NotePropertyValue $v.FileSystemLabel
         }
     }
 
     foreach ($csv in $csvs) {
-
         if ($($using:groups).Length -eq 0) {
             $groups = @( 'base' )
         } else {
@@ -238,17 +231,14 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
         # identify the CSvs for which this node should create its VMs
         # the trailing characters (if any) are the group prefix
         if ($csv.VDName -match "^$env:COMPUTERNAME(?:-.+){0,1}") {
-
             foreach ($group in $groups) {
-
                 if ($csv.VDName -match "^$env:COMPUTERNAME-([^-]+)$") {
-                    $g = $group+$matches[1]
+                    $g = $group + $matches[1]
                 } else {
                     $g = $group
                 }
 
                 foreach ($vm in 1..$using:vms) {
-
                     $stop = $false
 
                     $newvm = $false
@@ -267,21 +257,16 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
                         }
 
                         if ($stop) {
-
                             Write-Host -ForegroundColor Red "vm $name not deployed"
-
                         } else {
-
                             Write-Host -ForegroundColor Yellow "create vm $name @ metadata path $path with vhd $vhd"
 
                             # create vm if not already done
                             # note that when restarting interrupted creation, the vm could have moved elsewhere
                             # under cluster control.
-
-                            $o = Get-ClusterGroup |? GroupType -eq VirtualMachine |? Name -eq $name
+                            $o = Get-ClusterGroup | Where-Object GroupType -eq VirtualMachine | Where-Object Name -eq $name
 
                             if (-not $o) {
-
                                 # force re-specialization
                                 $newvm = $true
 
@@ -291,22 +276,19 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
                                 $o = get-vm -Name $name -ErrorAction SilentlyContinue
 
                                 if ($o) {
-
                                     # interrupted between vm creation and role creation; redo it
-                                    write-host "REMOVING vm $name for re-creation"
+                                    Write-Host "REMOVING vm $name for re-creation"
 
                                     if ($o.State -ne 'Off') {
                                         Stop-VM -Name $name -Force -Confirm:$false
                                     }
                                     Remove-VM -Name $name -Force -Confirm:$false
-
                                 } else {
-
                                     # scrub and re-create the vm metadata path and vhd
-                                    rmdir -ErrorAction SilentlyContinue -Recurse $path
+                                    Remove-Item -ErrorAction SilentlyContinue -Recurse $path
                                     $null = mkdir -ErrorAction SilentlyContinue $path
 
-                                    cp $using:basevhd $vhd
+                                    Copy-Item $using:basevhd $vhd
                                 }
 
                                 #### STOPAFTER
@@ -321,7 +303,7 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
                                     $o | Set-VM -ProcessorCount 1 -MemoryStartupBytes 1.75GB -StaticMemory
 
                                     # do not monitor the internal switch connection; this allows live migration
-                                    $o | Get-VMNetworkAdapter| Set-VMNetworkAdapter -NotMonitoredInCluster $true
+                                    $o | Get-VMNetworkAdapter | Set-VMNetworkAdapter -NotMonitoredInCluster $true
                                 }
                             }
 
@@ -331,7 +313,6 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
                             }
 
                             if (-not $stop) {
-                                
                                 # create clustered vm role and assign default owner node
                                 $o | Add-ClusterVirtualMachineRole
                                 Set-ClusterOwnerNode -Group $o.VMName -Owners $env:COMPUTERNAME
@@ -351,12 +332,12 @@ icm $nodes -ArgumentList $stopafter,(Get-Command Stop-After) {
                         # specialize as needed
                         # auto only specializes new vms; force always; none skips it
                         if (($using:specialize -eq 'Auto' -and $newvm) -or ($using:specialize -eq 'Force')) {
-                            write-host -fore yellow specialize $vhd
+                            Write-Host -fore yellow specialize $vhd
                             if (-not (specialize-vhd $vhd)) {
-                                write-host -fore red "Failed specialize of $vhd, halting."
+                                Write-Host -fore red "Failed specialize of $vhd, halting."
                             }
                         } else {
-                            write-host -fore green skip specialize $vhd
+                            Write-Host -fore green skip specialize $vhd
                         }
                     }
                 }
